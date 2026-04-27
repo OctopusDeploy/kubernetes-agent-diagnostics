@@ -43,14 +43,14 @@ Grab the latest release from the [Releases page](../../releases/latest) and run 
 
 ```bash
 # Linux x86_64
-curl -sSLO https://github.com/<org>/<repo>/releases/latest/download/octopus-agent-diag-linux-amd64
+curl -sSLO https://github.com/OctopusDeploy/kubernetes-agent-diagnostics/releases/latest/download/octopus-agent-diag-linux-amd64
 chmod +x octopus-agent-diag-linux-amd64
 ./octopus-agent-diag-linux-amd64
 ```
 
 ```bash
 # macOS (Apple Silicon)
-curl -sSLO https://github.com/<org>/<repo>/releases/latest/download/octopus-agent-diag-macos-arm64
+curl -sSLO https://github.com/OctopusDeploy/kubernetes-agent-diagnostics/releases/latest/download/octopus-agent-diag-macos-arm64
 chmod +x octopus-agent-diag-macos-arm64
 xattr -d com.apple.quarantine ./octopus-agent-diag-macos-arm64
 ./octopus-agent-diag-macos-arm64
