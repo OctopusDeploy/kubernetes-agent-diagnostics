@@ -58,7 +58,7 @@ xattr -d com.apple.quarantine ./octopus-agent-diag-macos-arm64
 
 ```powershell
 # Windows
-Invoke-WebRequest -Uri https://github.com/<org>/<repo>/releases/latest/download/octopus-agent-diag-windows-amd64.exe -OutFile octopus-agent-diag.exe
+Invoke-WebRequest -Uri https://github.com/OctopusDeploy/kubernetes-agent-diagnostics/releases/latest/download/octopus-agent-diag-windows-amd64.exe -OutFile octopus-agent-diag.exe
 .\octopus-agent-diag.exe
 ```
 
@@ -75,13 +75,13 @@ sha256sum -c SHA256SUMS.txt --ignore-missing
 If you have Python installed, you can run the script directly without a binary:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/<org>/<repo>/main/octopus-agent-diag.py | python3 -
+curl -sSL https://raw.githubusercontent.com/OctopusDeploy/kubernetes-agent-diagnostics/main/octopus-agent-diag.py | python3 -
 ```
 
 Or download and run:
 
 ```bash
-curl -sSLO https://raw.githubusercontent.com/<org>/<repo>/main/octopus-agent-diag.py
+curl -sSLO https://raw.githubusercontent.com/OctopusDeploy/kubernetes-agent-diagnostics/main/octopus-agent-diag.py
 python3 octopus-agent-diag.py
 ```
 
