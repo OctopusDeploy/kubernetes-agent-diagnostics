@@ -41,6 +41,7 @@ SENSITIVE_HELM_KEYS = frozenset(
     {
         "bearertoken",
         "serverapikey",
+        "serveraccesstoken",
         "username",
         "password",
         "certificate",
@@ -674,6 +675,7 @@ def sanitize_helm_values(yaml_text: str) -> str:
         m = re.match(
             r"^(?P<indent>\s*)(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<rest>.*)$", line
         )
+
         if m and m.group("key").lower() in SENSITIVE_HELM_KEYS:
             indent = m.group("indent")
             key = m.group("key")
