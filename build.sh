@@ -16,7 +16,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Detect platform for the output name
 case "$(uname -s)" in
   Linux*)   PLATFORM="linux" ;;
   Darwin*)  PLATFORM="macos" ;;

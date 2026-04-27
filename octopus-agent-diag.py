@@ -34,16 +34,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-# -----------------------------------------------------------------------------
-# Constants
-# -----------------------------------------------------------------------------
-
 AGENT_LABEL = "app.kubernetes.io/name=octopus-agent"
 LOG_TAIL_LINES = 5000
 
-# Keys we strip from Helm values before writing to the bundle. Match is
-# case-insensitive on the leaf key name, at any depth. `*SecretName` keys
-# are intentionally NOT in this list — they name a secret, not a value.
 SENSITIVE_HELM_KEYS = frozenset(
     {
         "bearertoken",
@@ -141,6 +134,7 @@ def capture(out_file: Path, cmd: list[str], timeout: int = 60) -> None:
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
+
 @dataclass
 class DiagContext:
     bundle_dir: Path
@@ -189,7 +183,6 @@ def locate_agent(ctx: DiagContext, user_namespace: str) -> None:
     section("Locating agent")
 
     if user_namespace:
-        # User-provided — just validate the namespace exists.
         if run(["kubectl", "get", "namespace", user_namespace]).ok:
             ctx.namespace = user_namespace
             ok(f"Using namespace: {user_namespace}")
@@ -240,7 +233,6 @@ def collect_cluster_info(ctx: DiagContext) -> None:
     )
     ok("Saved node info")
 
-    # Pull structured info for the SUMMARY
     r = run(["kubectl", "version", "-o", "json"])
     if r.ok:
         try:
@@ -486,6 +478,7 @@ def collect_helm(ctx: DiagContext) -> None:
     else:
         warn(f"No Helm releases found in namespace {ns}")
 
+
 def collect_rbac(ctx: DiagContext) -> None:
     """Collect RBAC. Secrets are deliberately skipped entirely."""
     if not ctx.namespace:
@@ -585,6 +578,7 @@ def collect_configmap_names(ctx: DiagContext) -> None:
                 lines.append(f"    {k}: {v}")
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+
 def collect_resource_usage(ctx: DiagContext) -> None:
     if not ctx.namespace:
         return
@@ -604,6 +598,7 @@ def collect_resource_usage(ctx: DiagContext) -> None:
         ["kubectl", "top", "pods", "-n", ctx.namespace, "--containers"],
     )
     ok("Saved resource usage")
+
 
 def parse_server_url(yaml_text: str) -> str:
     """
@@ -757,6 +752,7 @@ def sanitize_helm_values(yaml_text: str) -> str:
 
     return fallback
 
+
 def collect_network(ctx: DiagContext) -> None:
     section("Network checks")
 
@@ -847,6 +843,7 @@ def collect_network(ctx: DiagContext) -> None:
         ],
     )
 
+
 def write_summary(ctx: DiagContext) -> None:
     section("Building summary")
     summary = ctx.bundle_dir / "SUMMARY.txt"
@@ -887,6 +884,7 @@ def write_summary(ctx: DiagContext) -> None:
     summary.write_text("\n".join(lines), encoding="utf-8")
     ok("Summary written to SUMMARY.txt")
 
+
 def create_bundle(bundle_dir: Path, output_dir: Path) -> Path:
     section("Creating zip bundle")
     zip_path = output_dir / f"{bundle_dir.name}.zip"
@@ -899,6 +897,7 @@ def create_bundle(bundle_dir: Path, output_dir: Path) -> Path:
     shutil.rmtree(bundle_dir)
     ok(f"Bundle created: {zip_path}")
     return zip_path
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
