@@ -52,6 +52,7 @@ chmod +x octopus-agent-diag-linux-amd64
 # macOS (Apple Silicon)
 curl -sSLO https://github.com/<org>/<repo>/releases/latest/download/octopus-agent-diag-macos-arm64
 chmod +x octopus-agent-diag-macos-arm64
+xattr -d com.apple.quarantine ./octopus-agent-diag-macos-arm64
 ./octopus-agent-diag-macos-arm64
 ```
 
