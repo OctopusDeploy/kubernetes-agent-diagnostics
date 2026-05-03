@@ -12,7 +12,7 @@ Usage:
     python3 octopus-agent-diag.py --namespace octopus-agent-target
     python3 octopus-agent-diag.py -n octopus-agent -o /tmp/diag
 
-Or one-liner (once hosted):
+Or one-liner:
     curl -sSL https://<host>/octopus-agent-diag.py | python3 -
 """
 
@@ -27,7 +27,6 @@ import shutil
 import string
 import subprocess
 import sys
-import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -100,7 +99,6 @@ class CmdResult:
 
 
 def run(cmd: list[str], timeout: int = 60) -> CmdResult:
-    """Run a command and capture its output. Never raises."""
     try:
         proc = subprocess.run(
             cmd,
@@ -121,7 +119,6 @@ def run(cmd: list[str], timeout: int = 60) -> CmdResult:
 
 
 def capture(out_file: Path, cmd: list[str], timeout: int = 60) -> None:
-    """Run a command and write its output (plus a header) to a file."""
     result = run(cmd, timeout=timeout)
     header = f"# Command: {' '.join(cmd)}\n" f"# Run at: {utc_now()}\n\n"
     body = result.stdout
@@ -157,6 +154,7 @@ def check_preflight() -> bool:
     if not shutil.which("kubectl"):
         fail("kubectl not found on PATH. Install kubectl and try again.")
         return False
+
     r = run(["kubectl", "version", "--client", "-o", "json"])
     client_ver = "unknown"
     if r.ok:
@@ -166,8 +164,10 @@ def check_preflight() -> bool:
                 .get("clientVersion", {})
                 .get("gitVersion", "unknown")
             )
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            fail(f"Runtime error: {exc}")
+            return False
+
     ok(f"kubectl found: {client_ver}")
 
     if not run(["kubectl", "cluster-info"], timeout=15).ok:
@@ -175,6 +175,7 @@ def check_preflight() -> bool:
         ctx = run(["kubectl", "config", "current-context"]).stdout.strip() or "<none>"
         info(f"Current context: {ctx}")
         return False
+
     ctx = run(["kubectl", "config", "current-context"]).stdout.strip() or "<unknown>"
     ok(f"Cluster reachable (context: {ctx})")
     return True
@@ -292,7 +293,7 @@ def collect_agent_resources(ctx: DiagContext) -> None:
 
     if ctx.pods:
         ok(f"Described {len(ctx.pods)} pod(s)")
-        # Show a friendly table to the terminal
+
         status = run(["kubectl", "get", "pods", "-n", ns])
         if status.ok:
             print()
@@ -647,23 +648,6 @@ def parse_server_url(yaml_text: str) -> str:
 
 
 def sanitize_helm_values(yaml_text: str) -> str:
-    """
-    Redact sensitive values from a helm values YAML dump.
-
-    We operate on text rather than parsing/re-emitting YAML because we can't
-    depend on PyYAML and we want to preserve the original formatting for
-    everything we keep.
-
-    Rules:
-      - For each line of the form `<indent><key>: <value>`, if the key
-        (case-insensitive) is in SENSITIVE_HELM_KEYS, replace the value with
-        '<REDACTED>'.
-      - Multiline values introduced by `|` or `>` block scalars under a
-        sensitive key are replaced too — we consume subsequent lines that
-        are more indented than the key.
-      - *SecretName keys are left alone; they reference a secret by name
-        without exposing the value.
-    """
     if not yaml_text:
         return yaml_text
 
@@ -707,52 +691,6 @@ def sanitize_helm_values(yaml_text: str) -> str:
     if yaml_text.endswith("\n") and not result.endswith("\n"):
         result += "\n"
     return result
-
-    """
-    Extract agent.serverUrl (or fall back to global.serverApiUrl) from a
-    helm values.yaml dump.
-
-    This tracks the top-level block so we never confuse comment lines
-    mentioning 'serverUrl' with real nested values, and never pick up
-    a serverUrl from an unrelated block.
-    """
-    if not yaml_text:
-        return ""
-
-    current_block = ""
-    fallback = ""
-
-    for raw in yaml_text.splitlines():
-        # Strip trailing whitespace but preserve leading
-        line = raw.rstrip()
-        if not line:
-            continue
-
-        # Top-level key (no leading whitespace, not a comment, has a colon)
-        if not line[0].isspace() and not line.lstrip().startswith("#") and ":" in line:
-            current_block = line.split(":", 1)[0].strip()
-            continue
-
-        # Skip comments
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
-            continue
-
-        if current_block == "agent":
-            m = re.match(r"^\s+serverUrl:\s*(.*)$", line)
-            if m:
-                val = m.group(1).strip().strip('"').strip("'")
-                if val:
-                    return val
-
-        if current_block == "global":
-            m = re.match(r"^\s+serverApiUrl:\s*(.*)$", line)
-            if m:
-                val = m.group(1).strip().strip('"').strip("'")
-                if val and not fallback:
-                    fallback = val
-
-    return fallback
 
 
 def collect_network(ctx: DiagContext) -> None:
