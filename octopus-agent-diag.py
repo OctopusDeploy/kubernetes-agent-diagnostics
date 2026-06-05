@@ -11,9 +11,6 @@ Usage:
     python3 octopus-agent-diag.py
     python3 octopus-agent-diag.py --namespace octopus-agent-target
     python3 octopus-agent-diag.py -n octopus-agent -o /tmp/diag
-
-Or one-liner:
-    curl -sSL https://<host>/octopus-agent-diag.py | python3 -
 """
 
 from __future__ import annotations
