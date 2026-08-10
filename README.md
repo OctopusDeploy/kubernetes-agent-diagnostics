@@ -4,6 +4,12 @@ A single-file Python tool that gathers everything you need to troubleshoot an
 Octopus Deploy Kubernetes agent. Runs in any environment where you have
 `kubectl` configured — local, AKS, EKS, GKE, on-premises, anywhere.
 
+## When to use this tool
+
+Use this whenever an Octopus Deploy Kubernetes agent isn't behaving - it won't connect or register, its pods are unhealthy (CrashLoopBackOff, ImagePullBackOff, Pending, or constant restarts), or deployments are failing in a way that points at the agent itself. Run it as the first step in troubleshooting, or whenever support asks for diagnostics: one command collects the logs, events, connectivity checks, and config into a single zip, so whoever looks at the problem has everything they need up front. It's scoped to the Kubernetes agent, so it won't help with Tentacle targets, the Octopus Server itself, or a point-in-time issue that needs live monitoring rather than a snapshot.
+
+This tool is read-only - it inspects your cluster and writes a local zip. It never modifies, deletes, or reconfigures anything, and the collected data stays on your machine until you choose to share it.
+
 ## What it collects
 
 - Pod status, events, and last 5,000 lines of logs (including previous logs if a pod has restarted)

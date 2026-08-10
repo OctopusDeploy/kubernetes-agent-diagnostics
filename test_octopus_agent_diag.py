@@ -65,6 +65,16 @@ agent:
         self.assertNotInOutput("API-ABCDEF123456GHIJKL", out)
         self.assertIn("serverApiKey: <REDACTED>", out)
 
+    def test_redacts_serveraccesstoken(self):
+        yaml = """
+        kubernetesMonitor:
+          registration:
+            serverAccessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+"""
+        out = sanitize_helm_values(yaml)
+        self.assertNotInOutput("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", out)
+
+
     def test_redacts_password(self):
         yaml = """
 agent:
