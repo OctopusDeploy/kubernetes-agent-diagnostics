@@ -46,6 +46,12 @@ SENSITIVE_HELM_KEYS = frozenset(
     }
 )
 
+_SENSITIVE_ENV_NAME = re.compile(
+    r"TOKEN|PASSWORD|PASSWD|SECRET|APIKEY|API_KEY|ACCESS_KEY|CREDENTIAL|"
+    r"PRIVATE_KEY|KEY|CERT",
+    re.IGNORECASE,
+)
+
 ERROR_PATTERN = re.compile(
     r"\b(error|errors|fatal|panic|exception|failed|failure|denied|"
     r"unauthori[sz]ed|forbidden|timeout|timed out|refused|unreachable|"
@@ -688,6 +694,41 @@ def sanitize_helm_values(yaml_text: str) -> str:
     result = "\n".join(out)
     if yaml_text.endswith("\n") and not result.endswith("\n"):
         result += "\n"
+
+    return redact_env_values(result)
+
+
+def redact_env_values(text: str) -> str:
+    if not text:
+        return text
+
+    out: list[str] = []
+    pending = False   
+
+    for line in text.splitlines():
+        nm = re.match(r"^\s*-?\s*name:\s*(.+)$", line)
+        if nm:
+            env_name = nm.group(1).strip().strip('"').strip("'")
+            pending = bool(_SENSITIVE_ENV_NAME.search(env_name))
+            out.append(line)
+            continue
+
+        vm = re.match(r"^(\s*)value:\s*(.*)$", line)
+        if vm and pending:
+            out.append(f"{vm.group(1)}value: <REDACTED>")
+            pending = False
+            continue
+
+        if re.match(r"^\s*valueFrom:\s*.*$", line):
+            pending = False
+            out.append(line)
+            continue
+
+        out.append(line)
+
+    result = "\n".join(out)
+    if text.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
     return result
 
 def sanitize_manifest(manifest_text: str) -> str:
@@ -698,17 +739,37 @@ def sanitize_manifest(manifest_text: str) -> str:
     in_secret_doc = False
     data_indent: Optional[int] = None 
     redacting = False
+    pending_env_value = False
 
     for line in manifest_text.splitlines():
         if re.match(r"^---\s*$", line):
             in_secret_doc = False
             redacting = False
             data_indent = None
+            pending_env_value = False
             out.append(line)
             continue
 
         if re.match(r"^kind:\s*Secret\s*$", line):
             in_secret_doc = True
+            out.append(line)
+            continue
+
+        nm = re.match(r"^\s*-?\s*name:\s*(.+)$", line)
+        if nm:
+            env_name = nm.group(1).strip().strip('"').strip("'")
+            pending_env_value = bool(_SENSITIVE_ENV_NAME.search(env_name))
+            out.append(line)
+            continue
+
+        vm = re.match(r"^(\s*)value:\s*(.*)$", line)
+        if vm and pending_env_value:
+            out.append(f"{vm.group(1)}value: <REDACTED>")
+            pending_env_value = False
+            continue
+
+        if re.match(r"^\s*valueFrom:\s*.*$", line):
+            pending_env_value = False
             out.append(line)
             continue
 

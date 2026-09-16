@@ -205,6 +205,37 @@ agent:
         self.assertIn("# -- The server URL", out)
         self.assertNotInOutput("bearerToken: secret", out)
 
+    def test_redacts_inline_env_in_values_file(self):
+        yaml = (
+            "agent:\n"
+            "  name: octopus-agent\n"
+            "  serverUrl: https://octopus.example.com\n"
+            "  tentacle:\n"
+            "    env:\n"
+            "    - name: DEMO_API_KEY\n"
+            "      value: THIS-SHOULD-BE-REDACTED-12345\n"
+        )
+        out = sanitize_helm_values(yaml)
+        self.assertNotIn("THIS-SHOULD-BE-REDACTED-12345", out)
+        self.assertIn("value: <REDACTED>", out)
+        self.assertIn("serverUrl: https://octopus.example.com", out)
+        self.assertIn("name: octopus-agent", out)
+
+    def test_values_env_valuefrom_reference_preserved(self):
+        yaml = (
+            "agent:\n"
+            "  tentacle:\n"
+            "    env:\n"
+            "    - name: API_KEY\n"
+            "      valueFrom:\n"
+            "        secretKeyRef:\n"
+            "          name: my-auth\n"
+            "          key: api-key\n"
+        )
+        out = sanitize_helm_values(yaml)
+        self.assertNotIn("<REDACTED>", out)
+        self.assertIn("secretKeyRef:", out)
+
     def test_realistic_full_values_dump(self):
         """End-to-end: a realistic helm get values output."""
         yaml = """USER-SUPPLIED VALUES:
@@ -516,6 +547,279 @@ class TestSanitizeManifest(unittest.TestCase):
 
     def test_preserves_trailing_newline(self):
         self.assertTrue(sanitize_manifest("kind: Service\n").endswith("\n"))
+
+    def test_redacts_inline_sensitive_env_value(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: tentacle\n"
+            "          env:\n"
+            "            - name: OCTOPUS_API_KEY\n"
+            "              value: API-REALSECRETINLINE\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("API-REALSECRETINLINE", out)
+        self.assertIn("value: <REDACTED>", out)
+        # The env var name itself is fine to keep — it's just a label.
+        self.assertIn("name: OCTOPUS_API_KEY", out)
+
+    def test_preserves_valuefrom_secret_reference(self):
+        # valueFrom is a *reference* to a secret, not the secret — keep it.
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: BEARER_TOKEN\n"
+            "          valueFrom:\n"
+            "            secretKeyRef:\n"
+            "              name: octopus-agent-auth\n"
+            "              key: bearer-token\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotIn("<REDACTED>", out)
+        self.assertIn("secretKeyRef:", out)
+        self.assertIn("name: octopus-agent-auth", out)
+
+    def test_non_sensitive_env_value_is_kept(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Info\n"
+            "        - name: SERVER_PORT\n"
+            "          value: \"10943\"\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertIn("value: Info", out)
+        self.assertIn('value: "10943"', out)
+        self.assertNotIn("<REDACTED>", out)
+
+    def test_sensitive_name_followed_by_valuefrom_does_not_bleed(self):
+        # A sensitive name consumed by valueFrom must not cause the NEXT
+        # env var's plain value to be redacted.
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: API_KEY\n"
+            "          valueFrom:\n"
+            "            secretKeyRef:\n"
+            "              name: auth\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Debug\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertIn("value: Debug", out)          # must survive
+        self.assertNotIn("<REDACTED>", out)
+
+    def test_multiple_env_vars_mixed(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Info\n"
+            "        - name: DB_PASSWORD\n"
+            "          value: hunter2-inline-leak\n"
+            "        - name: REGION\n"
+            "          value: us-east\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("hunter2-inline-leak", out)
+        self.assertIn("value: Info", out)
+        self.assertIn("value: us-east", out)
+        self.assertEqual(out.count("<REDACTED>"), 1)  # only the password
+
+    def test_env_name_matching_is_deliberately_broad(self):
+        # We intentionally over-redact: any env name containing a trigger word
+        # (including "KEY" as a substring) has its value redacted. Redacting a
+        # harmless value costs nothing; missing a real credential breaks the
+        # "safe to share" guarantee. This test pins that intent so the matcher
+        # isn't quietly narrowed later.
+        redacted_names = [
+            "OCTOPUS_API_KEY", "DB_PASSWORD", "BEARER_TOKEN", "SSH_PRIVATE_KEY",
+            "LICENSE_KEY", "PUBLIC_KEY_PATH", "TLS_CERT", "MY_SECRET",
+        ]
+        kept_names = ["LOG_LEVEL", "REGION", "SERVER_PORT", "REPLICA_COUNT"]
+
+        for name in redacted_names:
+            manifest = (
+                "kind: Deployment\n"
+                "spec:\n"
+                "  containers:\n"
+                "    - env:\n"
+                f"        - name: {name}\n"
+                "          value: PLANTED-SECRET-VALUE\n"
+            )
+            out = sanitize_manifest(manifest)
+            self.assertNotIn("PLANTED-SECRET-VALUE", out,
+                             f"{name} should have been redacted")
+
+        for name in kept_names:
+            manifest = (
+                "kind: Deployment\n"
+                "spec:\n"
+                "  containers:\n"
+                "    - env:\n"
+                f"        - name: {name}\n"
+                "          value: harmless-config-value\n"
+            )
+            out = sanitize_manifest(manifest)
+            self.assertIn("harmless-config-value", out,
+                          f"{name} should have been kept")
+
+
+class TestParseServerUrl(unittest.TestCase):
+    """Tests for the Helm values parser.
+
+    This is the logic that the bash version got wrong. These cases all come
+    from real-world scenarios or the original bug report.
+    """
+
+    def test_populated_agent_server_url(self):
+        yaml = """
+agent:
+  name: my-agent
+  acceptEula: Y
+  serverUrl: https://octopus.example.com
+  serverCommsAddress: https://octopus.example.com:10943
+image:
+  tag: "9.1.3703"
+"""
+        self.assertEqual(parse_server_url(yaml), "https://octopus.example.com")
+
+    def test_empty_server_url_returns_empty(self):
+        yaml = """
+agent:
+  name: ""
+  serverUrl: ""
+  serverCommsAddress: ""
+"""
+        self.assertEqual(parse_server_url(yaml), "")
+
+    def test_comment_lines_mentioning_server_url_are_ignored(self):
+        """Reproduces the production bug — comment lines mentioning serverUrl."""
+        yaml = """
+# Default values for kubernetes-agent.
+# -- Override the name of the app
+nameOverride: ""
+agent:
+  name: ""
+  # -- The URL of the target Octopus Server to register this agent with
+  # @section -- Agent values
+  serverUrl: ""
+"""
+        self.assertEqual(parse_server_url(yaml), "")
+
+    def test_falls_back_to_global_server_api_url(self):
+        yaml = """
+agent:
+  name: ""
+  serverUrl: ""
+global:
+  serverApiUrl: https://octopus-global.example.com
+"""
+        self.assertEqual(parse_server_url(yaml), "https://octopus-global.example.com")
+
+    def test_quoted_url(self):
+        yaml = """
+agent:
+  serverUrl: "https://octopus.example.com"
+"""
+        self.assertEqual(parse_server_url(yaml), "https://octopus.example.com")
+
+    def test_single_quoted_url(self):
+        yaml = """
+agent:
+  serverUrl: 'https://octopus.example.com'
+"""
+        self.assertEqual(parse_server_url(yaml), "https://octopus.example.com")
+
+    def test_agent_takes_precedence_over_unrelated_blocks(self):
+        """If some other block has a serverUrl key, we must not pick it up."""
+        yaml = """
+scriptPods:
+  serverUrl: "https://should-not-match.com"
+agent:
+  serverUrl: "https://correct.com"
+"""
+        self.assertEqual(parse_server_url(yaml), "https://correct.com")
+
+    def test_empty_input(self):
+        self.assertEqual(parse_server_url(""), "")
+
+    def test_whitespace_only_input(self):
+        self.assertEqual(parse_server_url("   \n  \n"), "")
+
+    def test_agent_takes_precedence_over_global_when_both_set(self):
+        yaml = """
+agent:
+  serverUrl: https://agent-wins.example.com
+global:
+  serverApiUrl: https://global-loses.example.com
+"""
+        self.assertEqual(parse_server_url(yaml), "https://agent-wins.example.com")
+
+
+class TestErrorPattern(unittest.TestCase):
+    """Spot-check the error-scanning regex so we don't silently regress it."""
+
+    def assert_matches(self, line: str, should_match: bool = True) -> None:
+        actual = bool(ERROR_PATTERN.search(line))
+        self.assertEqual(
+            actual, should_match,
+            f"Expected match={should_match} for: {line!r}",
+        )
+
+    def test_matches_error(self):
+        self.assert_matches("2026-04-20T12:00:02Z ERROR connection refused")
+
+    def test_matches_fatal(self):
+        self.assert_matches("FATAL authentication failed: token expired")
+
+    def test_matches_panic(self):
+        self.assert_matches("runtime panic: segmentation violation")
+
+    def test_matches_warning(self):
+        self.assert_matches("WARN  retry attempt 1/5")
+
+    def test_matches_crashloopbackoff(self):
+        self.assert_matches("Pod is in CrashLoopBackOff state")
+
+    def test_matches_imagepullbackoff(self):
+        self.assert_matches("ImagePullBackOff: cannot pull image")
+
+    def test_matches_oomkilled(self):
+        self.assert_matches("Container was OOMKilled")
+
+    def test_matches_forbidden(self):
+        self.assert_matches('serviceaccount "x" is forbidden')
+
+    def test_matches_unauthorized(self):
+        self.assert_matches("401 Unauthorized")
+
+    def test_matches_unauthorised_british(self):
+        self.assert_matches("Request was unauthorised")
+
+    def test_matches_connection_refused(self):
+        self.assert_matches("dial tcp: connection refused")
+
+    def test_ignores_terror_substring(self):
+        self.assert_matches("The terror of legacy code", should_match=False)
+
+    def test_ignores_word_warning_in_url(self):
+        self.assert_matches("Visit https://example.com/notawarnbutsimilar", should_match=False)
+
+    def test_normal_info_line_does_not_match(self):
+        self.assert_matches("2026-04-20T12:00:00Z INFO Agent started", should_match=False)
 
 
 if __name__ == "__main__":
