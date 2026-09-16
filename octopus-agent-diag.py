@@ -46,7 +46,7 @@ SENSITIVE_HELM_KEYS = frozenset(
     }
 )
 
-_SENSITIVE_ENV_NAME = re.compile(
+SENSITIVE_ENV_NAME = re.compile(
     r"TOKEN|PASSWORD|PASSWD|SECRET|APIKEY|API_KEY|ACCESS_KEY|CREDENTIAL|"
     r"PRIVATE_KEY|KEY|CERT",
     re.IGNORECASE,
@@ -709,7 +709,7 @@ def redact_env_values(text: str) -> str:
         nm = re.match(r"^\s*-?\s*name:\s*(.+)$", line)
         if nm:
             env_name = nm.group(1).strip().strip('"').strip("'")
-            pending = bool(_SENSITIVE_ENV_NAME.search(env_name))
+            pending = bool(SENSITIVE_ENV_NAME.search(env_name))
             out.append(line)
             continue
 
@@ -758,7 +758,7 @@ def sanitize_manifest(manifest_text: str) -> str:
         nm = re.match(r"^\s*-?\s*name:\s*(.+)$", line)
         if nm:
             env_name = nm.group(1).strip().strip('"').strip("'")
-            pending_env_value = bool(_SENSITIVE_ENV_NAME.search(env_name))
+            pending_env_value = bool(SENSITIVE_ENV_NAME.search(env_name))
             out.append(line)
             continue
 
