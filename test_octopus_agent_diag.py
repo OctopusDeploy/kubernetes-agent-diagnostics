@@ -404,7 +404,6 @@ class TestSanitizeManifest(unittest.TestCase):
         )
 
     def test_redacts_secret_data_regardless_of_key_name(self):
-        # The exact bug that started this: hyphenated/dotted data keys.
         manifest = (
             "---\n"
             "apiVersion: v1\n"
