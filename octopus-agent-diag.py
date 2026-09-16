@@ -14,7 +14,8 @@ Usage:
 """
 
 from __future__ import annotations
-
+from typing import Optional
+ 
 import argparse
 import json
 import os
@@ -463,7 +464,7 @@ def collect_helm(ctx: DiagContext) -> None:
             f"# Command: helm get manifest {rel} -n {ns}\n"
             f"# Run at: {utc_now()}\n"
             f"# NOTE: Sensitive keys have been redacted before writing.\n\n"
-            + sanitize_helm_values(manifest_result.stdout),
+            + sanitize_manifest(manifest_result.stdout),
             encoding="utf-8",
         )
 
@@ -686,6 +687,58 @@ def sanitize_helm_values(yaml_text: str) -> str:
 
     result = "\n".join(out)
     if yaml_text.endswith("\n") and not result.endswith("\n"):
+        result += "\n"
+    return result
+
+def sanitize_manifest(manifest_text: str) -> str:
+    if not manifest_text:
+        return manifest_text
+
+    out: list[str] = []
+    in_secret_doc = False
+    data_indent: Optional[int] = None 
+    redacting = False
+
+    for line in manifest_text.splitlines():
+        if re.match(r"^---\s*$", line):
+            in_secret_doc = False
+            redacting = False
+            data_indent = None
+            out.append(line)
+            continue
+
+        if re.match(r"^kind:\s*Secret\s*$", line):
+            in_secret_doc = True
+            out.append(line)
+            continue
+
+        if in_secret_doc:
+            m = re.match(r"^(\s*)(data|stringData):\s*$", line)
+            if m:
+                data_indent = len(m.group(1))
+                redacting = True
+                out.append(line)
+                continue
+
+            if redacting:
+                stripped = line.strip()
+                if stripped == "":
+                    out.append(line)
+                    continue
+                indent = len(line) - len(line.lstrip())
+                if indent > (data_indent or 0):
+                    km = re.match(r"^(\s*)([^:]+):\s*(.*)$", line)
+                    if km:
+                        out.append(f"{km.group(1)}{km.group(2)}: <REDACTED>")
+                    else:
+                        out.append(f"{' ' * ((data_indent or 0) + 2)}<REDACTED>")
+                    continue
+                redacting = False
+
+        out.append(line)
+
+    result = "\n".join(out)
+    if manifest_text.endswith("\n") and not result.endswith("\n"):
         result += "\n"
     return result
 

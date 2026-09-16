@@ -22,6 +22,7 @@ _spec.loader.exec_module(_module)
 
 parse_server_url = _module.parse_server_url
 sanitize_helm_values = _module.sanitize_helm_values
+sanitize_manifest = _module.sanitize_manifest
 ERROR_PATTERN = _module.ERROR_PATTERN
 SENSITIVE_HELM_KEYS = _module.SENSITIVE_HELM_KEYS
 
@@ -386,6 +387,136 @@ class TestErrorPattern(unittest.TestCase):
         self.assert_matches(
             "2026-04-20T12:00:00Z INFO Agent started", should_match=False
         )
+
+class TestSanitizeManifest(unittest.TestCase):
+    """Tests for the manifest sanitizer.
+
+    Unlike the values sanitizer (which matches known credential key names),
+    this redacts the entire data/stringData block of any Secret document,
+    regardless of key name — because a Secret's data keys are arbitrary
+    (api-key, bearer-token, .dockerconfigjson, tls.crt, ...).
+    """
+
+    def assertNotInOutput(self, needle: str, output: str) -> None:
+        self.assertNotIn(
+            needle, output,
+            f"Sensitive value {needle!r} leaked into sanitized manifest:\n{output}",
+        )
+
+    def test_redacts_secret_data_regardless_of_key_name(self):
+        # The exact bug that started this: hyphenated/dotted data keys.
+        manifest = (
+            "---\n"
+            "apiVersion: v1\n"
+            "kind: Secret\n"
+            "metadata:\n"
+            "  name: octopus-agent-tentacle-server-auth\n"
+            "type: Opaque\n"
+            "data:\n"
+            "  api-key: QVBJLUZaS1NFQ1JFVExFQUs=\n"
+            "  bearer-token: YmVhcmVyLXNlY3JldC1sZWFr\n"
+            "  .dockerconfigjson: eyJhdXRocyI6e319\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("QVBJLUZaS1NFQ1JFVExFQUs=", out)
+        self.assertNotInOutput("YmVhcmVyLXNlY3JldC1sZWFr", out)
+        self.assertNotInOutput("eyJhdXRocyI6e319", out)
+        self.assertIn("api-key: <REDACTED>", out)
+        self.assertIn("bearer-token: <REDACTED>", out)
+        self.assertIn(".dockerconfigjson: <REDACTED>", out)
+        self.assertIn("name: octopus-agent-tentacle-server-auth", out)
+
+    def test_redacts_string_data_block(self):
+        manifest = (
+            "kind: Secret\n"
+            "stringData:\n"
+            "  password: plaintext-should-not-leak\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("plaintext-should-not-leak", out)
+        self.assertIn("password: <REDACTED>", out)
+
+    def test_non_secret_document_is_untouched(self):
+        manifest = (
+            "---\n"
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            "  name: octopus-agent-tentacle\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: tentacle\n"
+            "          image: octopusdeploy/kubernetes-agent-tentacle:9.1.3703\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertEqual(manifest, out)
+
+    def test_data_key_on_non_secret_is_not_redacted(self):
+        manifest = (
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  log-level: Info\n"
+            "  server-port: \"10943\"\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertIn("log-level: Info", out)
+        self.assertIn('server-port: "10943"', out)
+        self.assertNotIn("<REDACTED>", out)
+
+    def test_multi_doc_redacts_only_the_secret(self):
+        manifest = (
+            "---\n"
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  log-level: Info\n"
+            "---\n"
+            "kind: Secret\n"
+            "data:\n"
+            "  api-key: U0VDUkVUTEVBSw==\n"
+            "---\n"
+            "kind: Service\n"
+            "metadata:\n"
+            "  name: octopus-agent\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("U0VDUkVUTEVBSw==", out)
+        self.assertIn("log-level: Info", out)
+        self.assertIn("name: octopus-agent", out)
+        self.assertIn("api-key: <REDACTED>", out)
+
+    def test_redaction_stops_at_end_of_data_block(self):
+        manifest = (
+            "kind: Secret\n"
+            "data:\n"
+            "  api-key: U0VDUkVU\n"
+            "type: Opaque\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("U0VDUkVU", out)
+        self.assertIn("api-key: <REDACTED>", out)
+        self.assertIn("type: Opaque", out)
+
+    def test_secret_state_resets_between_documents(self):
+        manifest = (
+            "kind: Secret\n"
+            "data:\n"
+            "  api-key: U0VDUkVU\n"
+            "---\n"
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  visible: yes-please\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("U0VDUkVU", out)
+        self.assertIn("visible: yes-please", out)
+
+    def test_empty_input(self):
+        self.assertEqual(sanitize_manifest(""), "")
+
+    def test_preserves_trailing_newline(self):
+        self.assertTrue(sanitize_manifest("kind: Service\n").endswith("\n"))
 
 
 if __name__ == "__main__":
