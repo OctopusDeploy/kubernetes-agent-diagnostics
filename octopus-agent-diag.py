@@ -742,7 +742,7 @@ def redact_env_values(text: str) -> str:
                     leading = len(nxt) - len(nxt.lstrip())
                     if leading <= key_indent:
                         break
-                    i += 1  # drop this continuation line
+                    i += 1
             continue
 
         if re.match(r"^\s*valueFrom:\s*.*$", line):
@@ -811,7 +811,6 @@ def sanitize_manifest(manifest_text: str) -> str:
     if manifest_text.endswith("\n") and not result.endswith("\n"):
         result += "\n"
 
-    # Second pass: inline env-var secrets (shared with the values sanitizer).
     return redact_env_values(result)
 
 
