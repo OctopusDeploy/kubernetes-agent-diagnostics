@@ -22,6 +22,8 @@ _spec.loader.exec_module(_module)
 
 parse_server_url = _module.parse_server_url
 sanitize_helm_values = _module.sanitize_helm_values
+sanitize_manifest = _module.sanitize_manifest
+redact_env_values = _module.redact_env_values
 ERROR_PATTERN = _module.ERROR_PATTERN
 SENSITIVE_HELM_KEYS = _module.SENSITIVE_HELM_KEYS
 
@@ -30,8 +32,8 @@ class TestSanitizeHelmValues(unittest.TestCase):
     """Tests for Helm values sanitization.
 
     The critical property: no sensitive value from the input should appear
-    anywhere in the output. We both check that specific values are gone
-    AND that <REDACTED> appears where expected.
+    anywhere in the output. We both check that specific values are gone AND
+    that <REDACTED> appears where expected.
     """
 
     def assertNotInOutput(self, needle: str, output: str) -> None:
@@ -65,15 +67,15 @@ agent:
         self.assertNotInOutput("API-ABCDEF123456GHIJKL", out)
         self.assertIn("serverApiKey: <REDACTED>", out)
 
-    def test_redacts_serveraccesstoken(self):
+    def test_redacts_server_access_token(self):
         yaml = """
-        kubernetesMonitor:
-          registration:
-            serverAccessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+kubernetesMonitor:
+  registration:
+    serverAccessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
 """
         out = sanitize_helm_values(yaml)
         self.assertNotInOutput("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", out)
-
+        self.assertIn("serverAccessToken: <REDACTED>", out)
 
     def test_redacts_password(self):
         yaml = """
@@ -204,6 +206,55 @@ agent:
         self.assertIn("# -- The server URL", out)
         self.assertNotInOutput("bearerToken: secret", out)
 
+    def test_redacts_inline_env_in_values_file(self):
+        yaml = (
+            "agent:\n"
+            "  name: octopus-agent\n"
+            "  serverUrl: https://octopus.example.com\n"
+            "  tentacle:\n"
+            "    env:\n"
+            "    - name: DEMO_API_KEY\n"
+            "      value: THIS-SHOULD-BE-REDACTED-12345\n"
+        )
+        out = sanitize_helm_values(yaml)
+        self.assertNotInOutput("THIS-SHOULD-BE-REDACTED-12345", out)
+        self.assertIn("value: <REDACTED>", out)
+        self.assertIn("serverUrl: https://octopus.example.com", out)
+        self.assertIn("name: octopus-agent", out)
+
+    def test_values_env_valuefrom_reference_preserved(self):
+        yaml = (
+            "agent:\n"
+            "  tentacle:\n"
+            "    env:\n"
+            "    - name: API_KEY\n"
+            "      valueFrom:\n"
+            "        secretKeyRef:\n"
+            "          name: my-auth\n"
+            "          key: api-key\n"
+        )
+        out = sanitize_helm_values(yaml)
+        self.assertNotIn("<REDACTED>", out)
+        self.assertIn("secretKeyRef:", out)
+
+    def test_block_scalar_env_in_values_file(self):
+        yaml = (
+            "agent:\n"
+            "  tentacle:\n"
+            "    env:\n"
+            "    - name: SSL_CERT\n"
+            "      value: |\n"
+            "        -----BEGIN CERTIFICATE-----\n"
+            "        VALUESFILECERTLEAK\n"
+            "        -----END CERTIFICATE-----\n"
+            "    - name: LOG_LEVEL\n"
+            "      value: Info\n"
+        )
+        out = sanitize_helm_values(yaml)
+        self.assertNotInOutput("VALUESFILECERTLEAK", out)
+        self.assertNotInOutput("BEGIN CERTIFICATE", out)
+        self.assertIn("value: Info", out)
+
     def test_realistic_full_values_dump(self):
         """End-to-end: a realistic helm get values output."""
         yaml = """USER-SUPPLIED VALUES:
@@ -236,6 +287,295 @@ image:
         self.assertIn("acceptEula: Y", out)
         self.assertIn("space: Default", out)
         self.assertIn('tag: "9.1.3703"', out)
+
+
+class TestSanitizeManifest(unittest.TestCase):
+    """Tests for the manifest sanitizer.
+
+    Unlike the values sanitizer (which matches known credential key names),
+    this redacts the entire data/stringData block of any Secret document,
+    regardless of key name — because a Secret's data keys are arbitrary
+    (api-key, bearer-token, .dockerconfigjson, tls.crt, ...).
+    """
+
+    def assertNotInOutput(self, needle: str, output: str) -> None:
+        self.assertNotIn(
+            needle,
+            output,
+            f"Sensitive value {needle!r} leaked into sanitized manifest:\n{output}",
+        )
+
+    def test_redacts_secret_data_regardless_of_key_name(self):
+        manifest = (
+            "---\n"
+            "apiVersion: v1\n"
+            "kind: Secret\n"
+            "metadata:\n"
+            "  name: octopus-agent-tentacle-server-auth\n"
+            "type: Opaque\n"
+            "data:\n"
+            "  api-key: QVBJLUZaS1NFQ1JFVExFQUs=\n"
+            "  bearer-token: YmVhcmVyLXNlY3JldC1sZWFr\n"
+            "  .dockerconfigjson: eyJhdXRocyI6e319\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("QVBJLUZaS1NFQ1JFVExFQUs=", out)
+        self.assertNotInOutput("YmVhcmVyLXNlY3JldC1sZWFr", out)
+        self.assertNotInOutput("eyJhdXRocyI6e319", out)
+        self.assertIn("api-key: <REDACTED>", out)
+        self.assertIn("bearer-token: <REDACTED>", out)
+        self.assertIn(".dockerconfigjson: <REDACTED>", out)
+        self.assertIn("name: octopus-agent-tentacle-server-auth", out)
+
+    def test_redacts_string_data_block(self):
+        manifest = (
+            "kind: Secret\n"
+            "stringData:\n"
+            "  password: plaintext-should-not-leak\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("plaintext-should-not-leak", out)
+        self.assertIn("password: <REDACTED>", out)
+
+    def test_non_secret_document_is_untouched(self):
+        manifest = (
+            "---\n"
+            "apiVersion: apps/v1\n"
+            "kind: Deployment\n"
+            "metadata:\n"
+            "  name: octopus-agent-tentacle\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: tentacle\n"
+            "          image: octopusdeploy/kubernetes-agent-tentacle:9.1.3703\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertEqual(manifest, out)
+
+    def test_data_key_on_non_secret_is_not_redacted(self):
+        manifest = (
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  log-level: Info\n"
+            '  server-port: "10943"\n'
+        )
+        out = sanitize_manifest(manifest)
+        self.assertIn("log-level: Info", out)
+        self.assertIn('server-port: "10943"', out)
+        self.assertNotIn("<REDACTED>", out)
+
+    def test_multi_doc_redacts_only_the_secret(self):
+        manifest = (
+            "---\n"
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  log-level: Info\n"
+            "---\n"
+            "kind: Secret\n"
+            "data:\n"
+            "  api-key: U0VDUkVUTEVBSw==\n"
+            "---\n"
+            "kind: Service\n"
+            "metadata:\n"
+            "  name: octopus-agent\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("U0VDUkVUTEVBSw==", out)
+        self.assertIn("log-level: Info", out)
+        self.assertIn("name: octopus-agent", out)
+        self.assertIn("api-key: <REDACTED>", out)
+
+    def test_redaction_stops_at_end_of_data_block(self):
+        manifest = (
+            "kind: Secret\n"
+            "data:\n"
+            "  api-key: U0VDUkVU\n"
+            "type: Opaque\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("U0VDUkVU", out)
+        self.assertIn("api-key: <REDACTED>", out)
+        self.assertIn("type: Opaque", out)
+
+    def test_secret_state_resets_between_documents(self):
+        manifest = (
+            "kind: Secret\n"
+            "data:\n"
+            "  api-key: U0VDUkVU\n"
+            "---\n"
+            "kind: ConfigMap\n"
+            "data:\n"
+            "  visible: yes-please\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("U0VDUkVU", out)
+        self.assertIn("visible: yes-please", out)
+
+    def test_empty_input(self):
+        self.assertEqual(sanitize_manifest(""), "")
+
+    def test_preserves_trailing_newline(self):
+        self.assertTrue(sanitize_manifest("kind: Service\n").endswith("\n"))
+
+    def test_redacts_inline_sensitive_env_value(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  template:\n"
+            "    spec:\n"
+            "      containers:\n"
+            "        - name: tentacle\n"
+            "          env:\n"
+            "            - name: OCTOPUS_API_KEY\n"
+            "              value: API-REALSECRETINLINE\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("API-REALSECRETINLINE", out)
+        self.assertIn("value: <REDACTED>", out)
+        self.assertIn("name: OCTOPUS_API_KEY", out)
+
+    def test_preserves_valuefrom_secret_reference(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: BEARER_TOKEN\n"
+            "          valueFrom:\n"
+            "            secretKeyRef:\n"
+            "              name: octopus-agent-auth\n"
+            "              key: bearer-token\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotIn("<REDACTED>", out)
+        self.assertIn("secretKeyRef:", out)
+        self.assertIn("name: octopus-agent-auth", out)
+
+    def test_non_sensitive_env_value_is_kept(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Info\n"
+            "        - name: SERVER_PORT\n"
+            '          value: "10943"\n'
+        )
+        out = sanitize_manifest(manifest)
+        self.assertIn("value: Info", out)
+        self.assertIn('value: "10943"', out)
+        self.assertNotIn("<REDACTED>", out)
+
+    def test_sensitive_name_followed_by_valuefrom_does_not_bleed(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: API_KEY\n"
+            "          valueFrom:\n"
+            "            secretKeyRef:\n"
+            "              name: auth\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Debug\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertIn("value: Debug", out)
+        self.assertNotIn("<REDACTED>", out)
+
+    def test_multiple_env_vars_mixed(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Info\n"
+            "        - name: DB_PASSWORD\n"
+            "          value: hunter2-inline-leak\n"
+            "        - name: REGION\n"
+            "          value: us-east\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("hunter2-inline-leak", out)
+        self.assertIn("value: Info", out)
+        self.assertIn("value: us-east", out)
+        self.assertEqual(out.count("<REDACTED>"), 1)
+
+    def test_env_name_matching_is_deliberately_broad(self):
+        redacted_names = [
+            "OCTOPUS_API_KEY", "DB_PASSWORD", "BEARER_TOKEN", "SSH_PRIVATE_KEY",
+            "LICENSE_KEY", "PUBLIC_KEY_PATH", "TLS_CERT", "MY_SECRET",
+        ]
+        kept_names = ["LOG_LEVEL", "REGION", "SERVER_PORT", "REPLICA_COUNT"]
+
+        for name in redacted_names:
+            manifest = (
+                "kind: Deployment\n"
+                "spec:\n"
+                "  containers:\n"
+                "    - env:\n"
+                f"        - name: {name}\n"
+                "          value: PLANTED-SECRET-VALUE\n"
+            )
+            out = sanitize_manifest(manifest)
+            self.assertNotIn(
+                "PLANTED-SECRET-VALUE", out, f"{name} should have been redacted"
+            )
+
+        for name in kept_names:
+            manifest = (
+                "kind: Deployment\n"
+                "spec:\n"
+                "  containers:\n"
+                "    - env:\n"
+                f"        - name: {name}\n"
+                "          value: harmless-config-value\n"
+            )
+            out = sanitize_manifest(manifest)
+            self.assertIn(
+                "harmless-config-value", out, f"{name} should have been kept"
+            )
+
+    def test_redacts_block_scalar_env_value(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: TLS_CERT\n"
+            "          value: |\n"
+            "            -----BEGIN CERTIFICATE-----\n"
+            "            MIIEvQIBADANSECRETCERTBODY\n"
+            "            -----END CERTIFICATE-----\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Info\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("SECRETCERTBODY", out)
+        self.assertNotInOutput("BEGIN CERTIFICATE", out)
+        self.assertIn("value: <REDACTED>", out)
+        self.assertIn("value: Info", out)
+
+    def test_block_scalar_with_chomp_indicator(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: PRIVATE_KEY\n"
+            "          value: |-\n"
+            "            -----BEGIN PRIVATE KEY-----\n"
+            "            PRIVATEKEYSECRETLEAK\n"
+            "            -----END PRIVATE KEY-----\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("PRIVATEKEYSECRETLEAK", out)
+        self.assertNotInOutput("BEGIN PRIVATE KEY", out)
+        self.assertIn("value: <REDACTED>", out)
 
 
 class TestParseServerUrl(unittest.TestCase):
@@ -288,7 +628,9 @@ agent:
 global:
   serverApiUrl: https://octopus-global.example.com
 """
-        self.assertEqual(parse_server_url(yaml), "https://octopus-global.example.com")
+        self.assertEqual(
+            parse_server_url(yaml), "https://octopus-global.example.com"
+        )
 
     def test_quoted_url(self):
         yaml = """
