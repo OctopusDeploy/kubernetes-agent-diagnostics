@@ -563,11 +563,9 @@ class TestSanitizeManifest(unittest.TestCase):
         out = sanitize_manifest(manifest)
         self.assertNotInOutput("API-REALSECRETINLINE", out)
         self.assertIn("value: <REDACTED>", out)
-        # The env var name itself is fine to keep — it's just a label.
         self.assertIn("name: OCTOPUS_API_KEY", out)
 
     def test_preserves_valuefrom_secret_reference(self):
-        # valueFrom is a *reference* to a secret, not the secret — keep it.
         manifest = (
             "kind: Deployment\n"
             "spec:\n"
@@ -601,8 +599,6 @@ class TestSanitizeManifest(unittest.TestCase):
         self.assertNotIn("<REDACTED>", out)
 
     def test_sensitive_name_followed_by_valuefrom_does_not_bleed(self):
-        # A sensitive name consumed by valueFrom must not cause the NEXT
-        # env var's plain value to be redacted.
         manifest = (
             "kind: Deployment\n"
             "spec:\n"
@@ -616,7 +612,7 @@ class TestSanitizeManifest(unittest.TestCase):
             "          value: Debug\n"
         )
         out = sanitize_manifest(manifest)
-        self.assertIn("value: Debug", out)          # must survive
+        self.assertIn("value: Debug", out)
         self.assertNotIn("<REDACTED>", out)
 
     def test_multiple_env_vars_mixed(self):
@@ -636,14 +632,9 @@ class TestSanitizeManifest(unittest.TestCase):
         self.assertNotInOutput("hunter2-inline-leak", out)
         self.assertIn("value: Info", out)
         self.assertIn("value: us-east", out)
-        self.assertEqual(out.count("<REDACTED>"), 1)  # only the password
+        self.assertEqual(out.count("<REDACTED>"), 1)
 
     def test_env_name_matching_is_deliberately_broad(self):
-        # We intentionally over-redact: any env name containing a trigger word
-        # (including "KEY" as a substring) has its value redacted. Redacting a
-        # harmless value costs nothing; missing a real credential breaks the
-        # "safe to share" guarantee. This test pins that intent so the matcher
-        # isn't quietly narrowed later.
         redacted_names = [
             "OCTOPUS_API_KEY", "DB_PASSWORD", "BEARER_TOKEN", "SSH_PRIVATE_KEY",
             "LICENSE_KEY", "PUBLIC_KEY_PATH", "TLS_CERT", "MY_SECRET",
