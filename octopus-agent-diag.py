@@ -458,8 +458,11 @@ def collect_helm(ctx: DiagContext) -> None:
         values_out.write_text(
             f"# Command: helm get values {rel} -n {ns} --all\n"
             f"# Run at: {utc_now()}\n"
-            f"# NOTE: Sensitive keys have been redacted before writing. "
-            f"Redacted keys: {', '.join(sorted(SENSITIVE_HELM_KEYS))}\n\n"
+            f"# NOTE: This tool redacts known sensitive keys "
+            f"({', '.join(sorted(SENSITIVE_HELM_KEYS))}) and inline env-var secrets\n"
+            f"# before writing, but redaction is best-effort and cannot catch everything.\n"
+            f"# REVIEW this file before sharing and remove anything sensitive that\n"
+            f"# slipped through (e.g. secrets in custom values keys).\n\n"
             + sanitize_helm_values(values_result.stdout),
             encoding="utf-8",
         )
@@ -469,7 +472,10 @@ def collect_helm(ctx: DiagContext) -> None:
         manifest_out.write_text(
             f"# Command: helm get manifest {rel} -n {ns}\n"
             f"# Run at: {utc_now()}\n"
-            f"# NOTE: Sensitive keys have been redacted before writing.\n\n"
+            f"# NOTE: This tool redacts Secret data blocks and inline env-var secrets\n"
+            f"# before writing, but redaction is best-effort and cannot catch everything.\n"
+            f"# REVIEW this file before sharing and remove anything sensitive that\n"
+            f"# slipped through.\n\n"
             + sanitize_manifest(manifest_result.stdout),
             encoding="utf-8",
         )
@@ -703,28 +709,50 @@ def redact_env_values(text: str) -> str:
         return text
 
     out: list[str] = []
-    pending = False   
+    pending = False
+    lines = text.splitlines()
+    i = 0
 
-    for line in text.splitlines():
+    while i < len(lines):
+        line = lines[i]
+
         nm = re.match(r"^\s*-?\s*name:\s*(.+)$", line)
         if nm:
             env_name = nm.group(1).strip().strip('"').strip("'")
             pending = bool(SENSITIVE_ENV_NAME.search(env_name))
             out.append(line)
+            i += 1
             continue
 
         vm = re.match(r"^(\s*)value:\s*(.*)$", line)
         if vm and pending:
-            out.append(f"{vm.group(1)}value: <REDACTED>")
+            indent = vm.group(1)
+            rest = vm.group(2).rstrip()
+            out.append(f"{indent}value: <REDACTED>")
             pending = False
+            i += 1
+
+            if re.match(r"^[|>][+-]?\d*$", rest):
+                key_indent = len(indent)
+                while i < len(lines):
+                    nxt = lines[i]
+                    if nxt.strip() == "":
+                        i += 1
+                        continue
+                    leading = len(nxt) - len(nxt.lstrip())
+                    if leading <= key_indent:
+                        break
+                    i += 1  # drop this continuation line
             continue
 
         if re.match(r"^\s*valueFrom:\s*.*$", line):
             pending = False
             out.append(line)
+            i += 1
             continue
 
         out.append(line)
+        i += 1
 
     result = "\n".join(out)
     if text.endswith("\n") and not result.endswith("\n"):
@@ -737,39 +765,19 @@ def sanitize_manifest(manifest_text: str) -> str:
 
     out: list[str] = []
     in_secret_doc = False
-    data_indent: Optional[int] = None 
+    data_indent: Optional[int] = None
     redacting = False
-    pending_env_value = False
 
     for line in manifest_text.splitlines():
         if re.match(r"^---\s*$", line):
             in_secret_doc = False
             redacting = False
             data_indent = None
-            pending_env_value = False
             out.append(line)
             continue
 
         if re.match(r"^kind:\s*Secret\s*$", line):
             in_secret_doc = True
-            out.append(line)
-            continue
-
-        nm = re.match(r"^\s*-?\s*name:\s*(.+)$", line)
-        if nm:
-            env_name = nm.group(1).strip().strip('"').strip("'")
-            pending_env_value = bool(SENSITIVE_ENV_NAME.search(env_name))
-            out.append(line)
-            continue
-
-        vm = re.match(r"^(\s*)value:\s*(.*)$", line)
-        if vm and pending_env_value:
-            out.append(f"{vm.group(1)}value: <REDACTED>")
-            pending_env_value = False
-            continue
-
-        if re.match(r"^\s*valueFrom:\s*.*$", line):
-            pending_env_value = False
             out.append(line)
             continue
 
@@ -794,6 +802,7 @@ def sanitize_manifest(manifest_text: str) -> str:
                     else:
                         out.append(f"{' ' * ((data_indent or 0) + 2)}<REDACTED>")
                     continue
+        
                 redacting = False
 
         out.append(line)
@@ -801,7 +810,9 @@ def sanitize_manifest(manifest_text: str) -> str:
     result = "\n".join(out)
     if manifest_text.endswith("\n") and not result.endswith("\n"):
         result += "\n"
-    return result
+
+    # Second pass: inline env-var secrets (shared with the values sanitizer).
+    return redact_env_values(result)
 
 
 def collect_network(ctx: DiagContext) -> None:
@@ -1015,7 +1026,7 @@ def main() -> int:
 
     print("\nDone.")
     print(f"Share this file with Octopus support: {zip_path}")
-    print("No secrets or configmap data were collected. Helm values were sanitized.")
+    print("Helm output was sanitized (best-effort). Review the bundle before sharing.")
     return 0
 
 

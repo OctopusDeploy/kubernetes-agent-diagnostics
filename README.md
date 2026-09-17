@@ -14,7 +14,7 @@ This tool is read-only - it inspects your cluster and writes a local zip. It nev
 
 - Pod status, events, and last 5,000 lines of logs (including previous logs if a pod has restarted)
 - An `ERRORS.txt` that greps all collected logs for common failure keywords (error, fatal, panic, denied, timeout, CrashLoopBackOff, etc.) — the fastest way to find where something went wrong
-- Helm release info: **sanitized** values and manifest, plus history
+- Helm release info: values and manifest (redacted, best-effort — see below), plus history
 - Cluster version and node info
 - Resource usage (if metrics-server is available)
 - RBAC: service accounts, roles, rolebindings, cluster-scoped RBAC
@@ -26,14 +26,18 @@ Output is a single `.zip` that you can attach to a support ticket.
 
 ## What it does NOT collect
 
-The tool is designed to be safe to share without any manual review:
+The tool minimizes sensitive data in the bundle, but redaction is best-effort — **review the bundle before sharing** if your environment may hold secrets in unusual places. What it deliberately leaves out:
 
 - **Secret data** — not collected. We list secret names only, so support can confirm expected secrets exist.
 - **ConfigMap data** — not collected. We list configmap names and labels only.
-- **Sensitive Helm values** — these keys are replaced with `<REDACTED>` before the values file is written: `bearerToken`, `serverApiKey`, `username`, `password`, `certificate`, `serverCertificate`. This applies to nested occurrences (like `agent.upgrade.dockerAuth.password`) and multi-line certificate blocks.
+- **Secret manifests** — for any `Secret` object in the rendered manifest, the whole `data:`/`stringData:` block is redacted regardless of key name, so arbitrary or chart-defined secret keys can't leak.
+- **Sensitive Helm values** — these keys are replaced with `<REDACTED>` before the values file is written: `bearerToken`, `serverApiKey`, `serverAccessToken`, `username`, `password`, `certificate`, `serverCertificate`. This applies to nested occurrences (like `agent.upgrade.dockerAuth.password`) and multi-line certificate blocks.
+- **Inline env-var secrets** — an env var whose name looks sensitive (contains `token`, `password`, `key`, `secret`, `cert`, etc.) has its `value:` redacted in both the values file and the manifest, including multi-line cert/key blocks. `valueFrom:` secret references are preserved (they name a secret without exposing it).
 - **HTTP response bodies** — the network check uses `wget --spider` to capture response headers only, so if your Octopus server returns anything sensitive in an error response, it won't end up in the bundle.
 
 Helm values containing `*SecretName` keys (e.g. `bearerTokenSecretName: my-agent-auth`) are preserved because they reference a secret by name without exposing the value.
+
+> **Note:** pod logs are collected as-is and are not sanitized. If an application logs a token or connection string, it will be in the bundle. The review step matters most for `logs/` and the per-pod `describe` output.
 
 ## Prerequisites
 
@@ -128,8 +132,8 @@ octopus-agent-diag-20260420-143022/
 │   └── version.txt
 ├── helm/
 │   ├── releases.txt
-│   ├── <release>-values.yaml         # credentials replaced with <REDACTED>
-│   ├── <release>-manifest.yaml       # credentials replaced with <REDACTED>
+│   ├── <release>-values.yaml         # sensitive values redacted (best-effort)
+│   ├── <release>-manifest.yaml       # Secret data + inline env secrets redacted
 │   └── <release>-history.txt
 ├── logs/
 │   ├── <pod>_<container>.log
@@ -168,9 +172,11 @@ octopus-agent-diag-20260420-143022/
 python3 test_octopus_agent_diag.py
 ```
 
-The test suite covers the Helm values parser, the Helm values sanitizer
-(critical — proves no credentials leak), and the error-scanning regex.
-No external dependencies — runs on stock Python 3.8+.
+The test suite covers the Helm values parser, both sanitizers (values and
+manifest) including inline env-var and block-scalar redaction, and the
+error-scanning regex. Secret-redaction tests plant a known string and assert
+it's absent from the output. No external dependencies — runs on stock
+Python 3.8+.
 
 ### Building a binary locally
 

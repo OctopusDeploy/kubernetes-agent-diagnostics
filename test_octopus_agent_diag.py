@@ -23,6 +23,7 @@ _spec.loader.exec_module(_module)
 parse_server_url = _module.parse_server_url
 sanitize_helm_values = _module.sanitize_helm_values
 sanitize_manifest = _module.sanitize_manifest
+redact_env_values = _module.redact_env_values
 ERROR_PATTERN = _module.ERROR_PATTERN
 SENSITIVE_HELM_KEYS = _module.SENSITIVE_HELM_KEYS
 
@@ -31,8 +32,8 @@ class TestSanitizeHelmValues(unittest.TestCase):
     """Tests for Helm values sanitization.
 
     The critical property: no sensitive value from the input should appear
-    anywhere in the output. We both check that specific values are gone
-    AND that <REDACTED> appears where expected.
+    anywhere in the output. We both check that specific values are gone AND
+    that <REDACTED> appears where expected.
     """
 
     def assertNotInOutput(self, needle: str, output: str) -> None:
@@ -66,15 +67,15 @@ agent:
         self.assertNotInOutput("API-ABCDEF123456GHIJKL", out)
         self.assertIn("serverApiKey: <REDACTED>", out)
 
-    def test_redacts_serveraccesstoken(self):
+    def test_redacts_server_access_token(self):
         yaml = """
-        kubernetesMonitor:
-          registration:
-            serverAccessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+kubernetesMonitor:
+  registration:
+    serverAccessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
 """
         out = sanitize_helm_values(yaml)
         self.assertNotInOutput("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", out)
-
+        self.assertIn("serverAccessToken: <REDACTED>", out)
 
     def test_redacts_password(self):
         yaml = """
@@ -216,7 +217,7 @@ agent:
             "      value: THIS-SHOULD-BE-REDACTED-12345\n"
         )
         out = sanitize_helm_values(yaml)
-        self.assertNotIn("THIS-SHOULD-BE-REDACTED-12345", out)
+        self.assertNotInOutput("THIS-SHOULD-BE-REDACTED-12345", out)
         self.assertIn("value: <REDACTED>", out)
         self.assertIn("serverUrl: https://octopus.example.com", out)
         self.assertIn("name: octopus-agent", out)
@@ -235,6 +236,24 @@ agent:
         out = sanitize_helm_values(yaml)
         self.assertNotIn("<REDACTED>", out)
         self.assertIn("secretKeyRef:", out)
+
+    def test_block_scalar_env_in_values_file(self):
+        yaml = (
+            "agent:\n"
+            "  tentacle:\n"
+            "    env:\n"
+            "    - name: SSL_CERT\n"
+            "      value: |\n"
+            "        -----BEGIN CERTIFICATE-----\n"
+            "        VALUESFILECERTLEAK\n"
+            "        -----END CERTIFICATE-----\n"
+            "    - name: LOG_LEVEL\n"
+            "      value: Info\n"
+        )
+        out = sanitize_helm_values(yaml)
+        self.assertNotInOutput("VALUESFILECERTLEAK", out)
+        self.assertNotInOutput("BEGIN CERTIFICATE", out)
+        self.assertIn("value: Info", out)
 
     def test_realistic_full_values_dump(self):
         """End-to-end: a realistic helm get values output."""
@@ -270,155 +289,6 @@ image:
         self.assertIn('tag: "9.1.3703"', out)
 
 
-class TestParseServerUrl(unittest.TestCase):
-    """Tests for the Helm values parser.
-
-    This is the logic that the bash version got wrong. These cases all come
-    from real-world scenarios or the original bug report.
-    """
-
-    def test_populated_agent_server_url(self):
-        yaml = """
-agent:
-  name: my-agent
-  acceptEula: Y
-  serverUrl: https://octopus.example.com
-  serverCommsAddress: https://octopus.example.com:10943
-image:
-  tag: "9.1.3703"
-"""
-        self.assertEqual(parse_server_url(yaml), "https://octopus.example.com")
-
-    def test_empty_server_url_returns_empty(self):
-        yaml = """
-agent:
-  name: ""
-  serverUrl: ""
-  serverCommsAddress: ""
-"""
-        self.assertEqual(parse_server_url(yaml), "")
-
-    def test_comment_lines_mentioning_server_url_are_ignored(self):
-        """Reproduces the production bug — comment lines mentioning serverUrl."""
-        yaml = """
-# Default values for kubernetes-agent.
-# -- Override the name of the app
-nameOverride: ""
-agent:
-  name: ""
-  # -- The URL of the target Octopus Server to register this agent with
-  # @section -- Agent values
-  serverUrl: ""
-"""
-        self.assertEqual(parse_server_url(yaml), "")
-
-    def test_falls_back_to_global_server_api_url(self):
-        yaml = """
-agent:
-  name: ""
-  serverUrl: ""
-global:
-  serverApiUrl: https://octopus-global.example.com
-"""
-        self.assertEqual(parse_server_url(yaml), "https://octopus-global.example.com")
-
-    def test_quoted_url(self):
-        yaml = """
-agent:
-  serverUrl: "https://octopus.example.com"
-"""
-        self.assertEqual(parse_server_url(yaml), "https://octopus.example.com")
-
-    def test_single_quoted_url(self):
-        yaml = """
-agent:
-  serverUrl: 'https://octopus.example.com'
-"""
-        self.assertEqual(parse_server_url(yaml), "https://octopus.example.com")
-
-    def test_agent_takes_precedence_over_unrelated_blocks(self):
-        """If some other block has a serverUrl key, we must not pick it up."""
-        yaml = """
-scriptPods:
-  serverUrl: "https://should-not-match.com"
-agent:
-  serverUrl: "https://correct.com"
-"""
-        self.assertEqual(parse_server_url(yaml), "https://correct.com")
-
-    def test_empty_input(self):
-        self.assertEqual(parse_server_url(""), "")
-
-    def test_whitespace_only_input(self):
-        self.assertEqual(parse_server_url("   \n  \n"), "")
-
-    def test_agent_takes_precedence_over_global_when_both_set(self):
-        yaml = """
-agent:
-  serverUrl: https://agent-wins.example.com
-global:
-  serverApiUrl: https://global-loses.example.com
-"""
-        self.assertEqual(parse_server_url(yaml), "https://agent-wins.example.com")
-
-
-class TestErrorPattern(unittest.TestCase):
-    """Spot-check the error-scanning regex so we don't silently regress it."""
-
-    def assert_matches(self, line: str, should_match: bool = True) -> None:
-        actual = bool(ERROR_PATTERN.search(line))
-        self.assertEqual(
-            actual,
-            should_match,
-            f"Expected match={should_match} for: {line!r}",
-        )
-
-    def test_matches_error(self):
-        self.assert_matches("2026-04-20T12:00:02Z ERROR connection refused")
-
-    def test_matches_fatal(self):
-        self.assert_matches("FATAL authentication failed: token expired")
-
-    def test_matches_panic(self):
-        self.assert_matches("runtime panic: segmentation violation")
-
-    def test_matches_warning(self):
-        self.assert_matches("WARN  retry attempt 1/5")
-
-    def test_matches_crashloopbackoff(self):
-        self.assert_matches("Pod is in CrashLoopBackOff state")
-
-    def test_matches_imagepullbackoff(self):
-        self.assert_matches("ImagePullBackOff: cannot pull image")
-
-    def test_matches_oomkilled(self):
-        self.assert_matches("Container was OOMKilled")
-
-    def test_matches_forbidden(self):
-        self.assert_matches('serviceaccount "x" is forbidden')
-
-    def test_matches_unauthorized(self):
-        self.assert_matches("401 Unauthorized")
-
-    def test_matches_unauthorised_british(self):
-        self.assert_matches("Request was unauthorised")
-
-    def test_matches_connection_refused(self):
-        self.assert_matches("dial tcp: connection refused")
-
-    def test_ignores_terror_substring(self):
-        self.assert_matches("The terror of legacy code", should_match=False)
-
-    def test_ignores_word_warning_in_url(self):
-        self.assert_matches(
-            "Visit https://example.com/notawarnbutsimilar", should_match=False
-        )
-
-    def test_normal_info_line_does_not_match(self):
-        self.assert_matches(
-            "2026-04-20T12:00:00Z INFO Agent started", should_match=False
-        )
-
 class TestSanitizeManifest(unittest.TestCase):
     """Tests for the manifest sanitizer.
 
@@ -430,7 +300,8 @@ class TestSanitizeManifest(unittest.TestCase):
 
     def assertNotInOutput(self, needle: str, output: str) -> None:
         self.assertNotIn(
-            needle, output,
+            needle,
+            output,
             f"Sensitive value {needle!r} leaked into sanitized manifest:\n{output}",
         )
 
@@ -488,7 +359,7 @@ class TestSanitizeManifest(unittest.TestCase):
             "kind: ConfigMap\n"
             "data:\n"
             "  log-level: Info\n"
-            "  server-port: \"10943\"\n"
+            '  server-port: "10943"\n'
         )
         out = sanitize_manifest(manifest)
         self.assertIn("log-level: Info", out)
@@ -591,7 +462,7 @@ class TestSanitizeManifest(unittest.TestCase):
             "        - name: LOG_LEVEL\n"
             "          value: Info\n"
             "        - name: SERVER_PORT\n"
-            "          value: \"10943\"\n"
+            '          value: "10943"\n'
         )
         out = sanitize_manifest(manifest)
         self.assertIn("value: Info", out)
@@ -651,8 +522,9 @@ class TestSanitizeManifest(unittest.TestCase):
                 "          value: PLANTED-SECRET-VALUE\n"
             )
             out = sanitize_manifest(manifest)
-            self.assertNotIn("PLANTED-SECRET-VALUE", out,
-                             f"{name} should have been redacted")
+            self.assertNotIn(
+                "PLANTED-SECRET-VALUE", out, f"{name} should have been redacted"
+            )
 
         for name in kept_names:
             manifest = (
@@ -664,8 +536,46 @@ class TestSanitizeManifest(unittest.TestCase):
                 "          value: harmless-config-value\n"
             )
             out = sanitize_manifest(manifest)
-            self.assertIn("harmless-config-value", out,
-                          f"{name} should have been kept")
+            self.assertIn(
+                "harmless-config-value", out, f"{name} should have been kept"
+            )
+
+    def test_redacts_block_scalar_env_value(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: TLS_CERT\n"
+            "          value: |\n"
+            "            -----BEGIN CERTIFICATE-----\n"
+            "            MIIEvQIBADANSECRETCERTBODY\n"
+            "            -----END CERTIFICATE-----\n"
+            "        - name: LOG_LEVEL\n"
+            "          value: Info\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("SECRETCERTBODY", out)
+        self.assertNotInOutput("BEGIN CERTIFICATE", out)
+        self.assertIn("value: <REDACTED>", out)
+        self.assertIn("value: Info", out)
+
+    def test_block_scalar_with_chomp_indicator(self):
+        manifest = (
+            "kind: Deployment\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - env:\n"
+            "        - name: PRIVATE_KEY\n"
+            "          value: |-\n"
+            "            -----BEGIN PRIVATE KEY-----\n"
+            "            PRIVATEKEYSECRETLEAK\n"
+            "            -----END PRIVATE KEY-----\n"
+        )
+        out = sanitize_manifest(manifest)
+        self.assertNotInOutput("PRIVATEKEYSECRETLEAK", out)
+        self.assertNotInOutput("BEGIN PRIVATE KEY", out)
+        self.assertIn("value: <REDACTED>", out)
 
 
 class TestParseServerUrl(unittest.TestCase):
@@ -718,7 +628,9 @@ agent:
 global:
   serverApiUrl: https://octopus-global.example.com
 """
-        self.assertEqual(parse_server_url(yaml), "https://octopus-global.example.com")
+        self.assertEqual(
+            parse_server_url(yaml), "https://octopus-global.example.com"
+        )
 
     def test_quoted_url(self):
         yaml = """
@@ -766,7 +678,8 @@ class TestErrorPattern(unittest.TestCase):
     def assert_matches(self, line: str, should_match: bool = True) -> None:
         actual = bool(ERROR_PATTERN.search(line))
         self.assertEqual(
-            actual, should_match,
+            actual,
+            should_match,
             f"Expected match={should_match} for: {line!r}",
         )
 
@@ -807,10 +720,14 @@ class TestErrorPattern(unittest.TestCase):
         self.assert_matches("The terror of legacy code", should_match=False)
 
     def test_ignores_word_warning_in_url(self):
-        self.assert_matches("Visit https://example.com/notawarnbutsimilar", should_match=False)
+        self.assert_matches(
+            "Visit https://example.com/notawarnbutsimilar", should_match=False
+        )
 
     def test_normal_info_line_does_not_match(self):
-        self.assert_matches("2026-04-20T12:00:00Z INFO Agent started", should_match=False)
+        self.assert_matches(
+            "2026-04-20T12:00:00Z INFO Agent started", should_match=False
+        )
 
 
 if __name__ == "__main__":
